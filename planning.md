@@ -134,16 +134,14 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 Write out what a full user interaction looks like from start to finish — tool call by tool call. Use a specific example query.
 
+**What FitFindr needs to do:** FitFindr is a thrift-shopping agent that takes a user's request plus their wardrobe and chains three tools to land on a single styled recommendation. A user's request for an item triggers `search_listings` (filtering the mock dataset by description, size, and max price); the top match then triggers `suggest_outfit`, which pairs that item against the user's wardrobe; and that suggestion triggers `create_fit_card` to write the final caption. If `search_listings` finds nothing the agent stops and tells the user what to loosen (price, size, or keywords) rather than calling later tools with empty input, and if the wardrobe is empty `suggest_outfit` styles the item on its own instead of failing.
+
 **Example user query:** "I'm looking for a vintage graphic tee under $30. I mostly wear baggy jeans and chunky sneakers. What's out there and how would I style it?"
 
-**Step 1:**
-<!-- What does the agent do first? Which tool is called? With what input? -->
+**Step 1 — Search:** The agent parses the request and calls `search_listings(description="vintage graphic tee", size=None, max_price=30.0)`. It scans the dataset for tops whose title/tags match "vintage graphic tee" and whose price is ≤ $30, returning the top matches (e.g. `lst_006` "Graphic Tee — 2003 Tour Bootleg Style," $24, depop, good; `lst_033` "Vintage Band Tee — Faded Grey," $19, depop, fair). The agent picks the top result, `lst_006`.
 
-**Step 2:**
-<!-- What happens next? What was returned from step 1? What tool is called now? -->
+**Step 2 — Suggest outfit:** With a listing in hand, the agent calls `suggest_outfit(new_item=<lst_006>, wardrobe=<example wardrobe>)`. It reads the user's closet — baggy dark-wash jeans (`w_001`), chunky white sneakers (`w_007`), black denim jacket (`w_006`) — and returns a styling suggestion: "Wear this boxy bootleg tee with your baggy dark-wash jeans and chunky white sneakers; throw the cropped black denim jacket over the top and half-tuck the tee for shape."
 
-**Step 3:**
-<!-- Continue until the full interaction is complete -->
+**Step 3 — Fit card:** The agent passes the suggestion and item into `create_fit_card(outfit=<suggestion>, new_item=<lst_006>)`, which produces a shareable caption: "scored this 2003 bootleg tour tee on depop for $24 🤎 styled it with my baggy jeans + chunky sneakers and it's the easy fit i'll wear on repeat."
 
-**Final output to user:**
-<!-- What does the user actually see at the end? -->
+**Final output to user:** The user sees the matched listing (title, price, platform, condition), the styling suggestion built from their own wardrobe, and the ready-to-post fit card caption. If Step 1 had returned no matches, the user would instead see a short message suggesting they raise the price cap or broaden the keywords, and the interaction would end there.
