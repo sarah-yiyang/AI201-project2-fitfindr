@@ -48,7 +48,7 @@ Given a specific item and the user's current wardrobe, suggests one or more comp
 **Input parameters:**
 <!-- List each parameter, its type, and what it represents -->
 - `new_item` (dict): A listing dict (the item the user is considering buying).
-- `wardrobe` (dict): A wardrobe dict with an 'items' key containing a list of wardrobe item dicts. May be empty — handle this。
+- `wardrobe` (dict): A wardrobe dict with an 'items' key containing a list of wardrobe item dicts. May be empty — handle this.
 
 **What it returns:**
 <!-- Describe the return value -->
@@ -104,13 +104,12 @@ If outfit is empty or missing, return a descriptive error message string — do 
 
 The agent runs a fixed three-stage pipeline and only advances when the current stage produces usable output. At each step it inspects the session state and decides the next call:
 
-1. **`search_listings`** runs first on the user's request. Check whether `results` is empty. If it is, store an error message in the session and return early — no further tool is called. Otherwise set `selected_item = results[0]` and proceed to `suggest_outfit`.
+1. **`search_listings`** runs first on the user's request. Check whether `search_results` is empty. If it is, store an error message in the session and return early — no further tool is called. Otherwise set `selected_item = search_results[0]` and proceed to `suggest_outfit`.
 
-2. **`suggest_outfit`** runs on `selected_item` plus the user's wardrobe. If the wardrobe is empty, return a string offering general styling advice for the item on its own, store a note in the session, and return early. Otherwise store the outfit suggestion and proceed to `create_fit_card`.
+2. **`suggest_outfit`** runs on `selected_item` plus the user's wardrobe. If the wardrobe is empty, it still returns a usable string — general styling advice for the item on its own — rather than ending early. Either way the outfit suggestion is stored and the loop proceeds to `create_fit_card`.
 
 3. **`create_fit_card`** runs on the outfit suggestion. If the outfit data is missing or incomplete, store an error message and return early. Otherwise store the caption — the result is now complete (listing + styling + caption) and the loop terminates.
 
-**What gates each step:** the presence of each piece of state controls the next call. No matched listing means no outfit step; no outfit suggestion means no fit card. The loop ends either at success (after the fit card) or at any early return above.
 
 ---
 
@@ -119,9 +118,7 @@ The agent runs a fixed three-stage pipeline and only advances when the current s
 **How does information from one tool get passed to the next?**
 <!-- Describe how your agent stores and accesses state within a session. What data is tracked? How is it passed between tool calls? -->
 
-All state lives in a single **session dict**, created by `_new_session(query, wardrobe)` in `agent.py` at the start of each interaction. It is the single source of truth for one run: the planning loop reads what it needs from the session, calls a tool, and writes the result back, so each stage picks up where the previous one left off. Tools never call each other directly — output flows from one to the next through this shared dict.
-
-**Note on naming:** the session keys (e.g. `selected_item`, `outfit_suggestion`) are defined by `_new_session` in `agent.py` and read by `app.py`, while the tools in `tools.py` use their own parameter names (`new_item`, `outfit`). I kept the session-key names exactly as the code defines them so this doc matches the implementation, and the table below makes the session-key → tool-parameter mapping explicit so the difference isn't confusing.
+All state lives in a single session dict, created by `_new_session(query, wardrobe)` in `agent.py` at the start of each interaction. It is the single source for one run: the planning loop reads what it needs from the session, calls a tool, and writes the result back, so each stage picks up where the previous one left off. Tools never call each other directly — output flows from one to the next through this shared dict.
 
 **What the session tracks** (fields from `_new_session`):
 
@@ -146,9 +143,9 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
-| search_listings | No results match the query | |
-| suggest_outfit | Wardrobe is empty | |
-| create_fit_card | Outfit input is missing or incomplete | |
+| search_listings | No results match the query | Returns an empty list (never raises). The planning loop sees `search_results == []`, sets `session["error"]` to a helpful message (e.g. "No listings found — try broadening your keywords or raising the price cap.") and returns the session early **without** calling `suggest_outfit` or `create_fit_card`. |
+| suggest_outfit | Wardrobe is empty | Does not fail or return an empty string. Returns a general styling suggestion for the item on its own (how to wear it, what colors/pieces would pair well) so the loop can still continue to `create_fit_card`. |
+| create_fit_card | Outfit input is missing or incomplete | Does not raise. Returns a descriptive error-message string instead of a caption; the loop stores it in `session["fit_card"]` (or surfaces it via `session["error"]`) so the user sees a clear message rather than a crash. |
 
 ---
 
@@ -162,6 +159,21 @@ For each tool, describe the specific failure mode you're handling and what the a
      ASCII art, a Mermaid diagram (https://mermaid.js.org/syntax/flowchart.html), or an embedded
      sketch are all fine. You'll share this diagram with an AI tool when asking it to implement
      the planning loop and each individual tool. -->
+
+```mermaid
+flowchart TD
+    A[User query] --> B[Planning loop]
+    B --> C["search_listings(description, size, max_price)"]
+    C --> D{search_results empty?}
+    D -->|"search_results = []"| E["ERROR: 'No listings found...'"]
+    E --> Z[Return session]
+    D -->|"search_results = [item, ...]"| F["Session: selected_item = search_results[0]"]
+    F --> G["suggest_outfit(selected_item, wardrobe)"]
+    G --> H["Session: outfit_suggestion = '...'"]
+    H --> I["create_fit_card(outfit_suggestion, selected_item)"]
+    I --> J["Session: fit_card = '...'"]
+    J --> Z[Return session]
+```
 
 ---
 
@@ -180,7 +192,34 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 **Milestone 3 — Individual tool implementations:**
 
+I'll use Claude Code to implement the three tool in `tools.py`, **one tool at a time**. Never do all three in a single prompt so I can review and test each in isolation before moving on.
+
+- **`search_listings(description, size, max_price)`**
+  - *Input I'll give:* the Tool 1 spec block from this doc and a pointer to use `load_listings()` from `utils/data_loader.py` instead of re-reading the file.
+  - *Expected output:* a function that filters by `max_price` and `size` (case-insensitive, e.g. "M" matches "S/M"), scores remaining listings by keyword overlap with `description`, drops zero-score listings, and returns the top results sorted best-first.
+  - *How I'll verify:* check the generated code matches my spec (right parameters, returns `[]` rather than raising on no match), then run it against 3 queries — a match, a no-match, and a strict `max_price` — before trusting it.
+
+- **`suggest_outfit(new_item, wardrobe)`** *(LLM call)*
+  - *Input I'll give:* the Tool 2 spec block, plus the instruction to call Groq's `llama-3.3-70b-versatile` using `GROQ_API_KEY` from `.env`, and to handle `wardrobe["items"] == []` without crashing.
+  - *Expected output:* a function that builds a prompt from `new_item` + the wardrobe and returns a styling-suggestion string; on an empty wardrobe it returns general standalone styling advice rather than failing or returning an empty string.
+  - *How I'll verify:* review that the empty-wardrobe branch exists and matches my Error Handling row, then run it with the example wardrobe and with `get_empty_wardrobe()` to confirm both return sensible strings.
+
+- **`create_fit_card(outfit, new_item)`** *(LLM call)*
+  - *Input I'll give:* the Tool 3 spec block, noting the stub signature takes **both** `outfit` and `new_item`, and the "empty outfit → error-message string, not a crash" failure mode.
+  - *Expected output:* a function that calls the LLM to produce a short shareable caption and guards against an empty `outfit` string.
+  - *How I'll verify:* run it several times on the same input and confirm the captions vary (increase temperature if identical), and pass an empty `outfit` to confirm it returns an error string rather than raising.
+
+- **Tests:** I'll ask Claude Code to write `tests/test_tools.py` with at least one test per failure mode (results found, empty results, price filter, empty wardrobe, empty outfit), then run `pytest tests/` and confirm everything passes before starting Milestone 4.
+
 **Milestone 4 — Planning loop and state management:**
+
+I'll use Claude Code to implement `run_agent()` in `agent.py` and `handle_query()` in `app.py`, giving it the design I've already written here rather than letting it invent control flow.
+
+- *Info to refer to:* the Architecture diagram, the Planning Loop section, and the State Management section (session-key → tool-parameter table) from this doc, plus the existing `_new_session()` structure and `run_agent()` TODO steps in `agent.py`.
+- *Expected output:* 1. a `run_agent()` that follows the numbered step 2. a `handle_query()` in `app.py` that calls `run_agent()` and maps the session dict to the three Gradio output panels (showing `session["error"]` when set).
+- *How I'll verify:*
+  - Run the example query and print `session["selected_item"]`, `session["outfit_suggestion"]`, and `session["fit_card"]` — confirm the same `selected_item` dict that went into `suggest_outfit` is the one passed to `create_fit_card`, and that nothing is re-prompted or hardcoded between steps.
+  - Run `python3 agent.py` and confirm the no-results test case sets `session["error"]` and leaves `session["fit_card"] = None` — i.e. `suggest_outfit` is **not** called when `search_results` is empty. If all three tools run unconditionally, the loop isn't branching and I'll revise it.
 
 ---
 
