@@ -18,7 +18,54 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
+
+
+# ── query parsing ─────────────────────────────────────────────────────────────
+
+def _parse_query(query: str) -> dict:
+    """
+    Extract a search description, size, and max_price from a natural-language
+    query using regex (no LLM call — see the Planning Loop section of planning.md).
+
+    Returns a dict with keys: description (str), size (str|None), max_price (float|None).
+    """
+    remaining = query
+
+    # max_price: prefer an explicit "under/below/less than $30" phrase, then
+    # fall back to a bare "$30". Strip whatever matched from the description.
+    max_price = None
+    price_match = re.search(
+        r"(?:under|below|less than|max(?:imum)?|up to|<)\s*\$?\s*(\d+(?:\.\d+)?)",
+        remaining,
+        flags=re.IGNORECASE,
+    )
+    if price_match is None:
+        price_match = re.search(r"\$\s*(\d+(?:\.\d+)?)", remaining)
+    if price_match:
+        max_price = float(price_match.group(1))
+        remaining = remaining.replace(price_match.group(0), " ")
+
+    # size: an explicit "size M" / "size 8" / "size XXS" phrase.
+    size = None
+    size_match = re.search(r"\bsize\s+([A-Za-z0-9/]+)", remaining, flags=re.IGNORECASE)
+    if size_match:
+        size = size_match.group(1)
+        remaining = remaining.replace(size_match.group(0), " ")
+
+    # description: the leftover text with common filler phrases removed.
+    description = re.sub(
+        r"\b(i'?m looking for|looking for|i want|i need|find me|show me|"
+        r"what'?s out there|how would i style it|and how would i style it)\b",
+        " ",
+        remaining,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(r"\s+", " ", description).strip(" .,?!")
+
+    return {"description": description, "size": size, "max_price": max_price}
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -92,9 +139,41 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
+    # Step 1: Initialize the session.
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    # Step 2: Parse the query into search parameters.
+    session["parsed"] = _parse_query(query)
+
+    # Step 3: Search. Branch on the result — stop early if nothing matched.
+    session["search_results"] = search_listings(
+        description=session["parsed"]["description"],
+        size=session["parsed"]["size"],
+        max_price=session["parsed"]["max_price"],
+    )
+    if not session["search_results"]:
+        session["error"] = (
+            "No listings found — try broadening your keywords, "
+            "loosening the size, or raising the price cap."
+        )
+        return session
+
+    # Step 4: Select the top result.
+    session["selected_item"] = session["search_results"][0]
+
+    # Step 5: Suggest an outfit (handles an empty wardrobe on its own).
+    session["outfit_suggestion"] = suggest_outfit(
+        new_item=session["selected_item"],
+        wardrobe=session["wardrobe"],
+    )
+
+    # Step 6: Turn the outfit into a shareable fit card.
+    session["fit_card"] = create_fit_card(
+        outfit=session["outfit_suggestion"],
+        new_item=session["selected_item"],
+    )
+
+    # Step 7: Return the completed session.
     return session
 
 

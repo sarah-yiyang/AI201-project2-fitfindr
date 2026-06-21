@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -69,8 +70,47 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    # Tokenize the description into lowercased keywords, dropping a few
+    # common filler words that carry no matching signal.
+    _STOPWORDS = {"a", "an", "the", "for", "with", "in", "of", "and", "to", "my"}
+    keywords = [
+        tok
+        for tok in re.findall(r"[a-z0-9]+", description.lower())
+        if tok not in _STOPWORDS
+    ]
+
+    scored: list[tuple[int, dict]] = []
+    for listing in listings:
+        # 1. Price filter (inclusive). Skip the listing if it's over budget.
+        if max_price is not None and listing["price"] > max_price:
+            continue
+
+        # 2. Size filter (case-insensitive substring, e.g. "M" matches "S/M").
+        if size is not None and size.lower() not in str(listing["size"]).lower():
+            continue
+
+        # 3. Score by keyword overlap against the listing's text fields.
+        haystack = " ".join(
+            [
+                listing["title"],
+                listing["description"],
+                listing["category"],
+                " ".join(listing["style_tags"]),
+                " ".join(listing["colors"]),
+                listing["brand"] or "",
+            ]
+        ).lower()
+        score = sum(1 for kw in keywords if kw in haystack)
+
+        # 4. Drop listings with no keyword overlap.
+        if score > 0:
+            scored.append((score, listing))
+
+    # 5. Sort by score, highest first, and return the top 3 listing dicts.
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [listing for _score, listing in scored[:3]]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +140,58 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    client = _get_groq_client()
+
+    # Describe the new item for the prompt.
+    item_desc = (
+        f"{new_item['title']} "
+        f"(category: {new_item['category']}, "
+        f"colors: {', '.join(new_item['colors'])}, "
+        f"style: {', '.join(new_item['style_tags'])})"
+    )
+
+    items = wardrobe.get("items", [])
+    if not items:
+        # 2. Empty wardrobe — ask for general standalone styling advice.
+        prompt = (
+            f"A shopper is considering buying this secondhand item:\n{item_desc}\n\n"
+            "They haven't told us what's in their wardrobe. In 2-3 sentences, "
+            "suggest how to style this piece: what kinds of items pair well with "
+            "it, what colors work, and what vibe or occasion it suits. Keep it "
+            "concrete and friendly, not a generic list."
+        )
+    else:
+        # 3. Non-empty wardrobe — suggest specific combos using named pieces.
+        wardrobe_lines = "\n".join(
+            f"- {it['name']} (category: {it['category']}, "
+            f"colors: {', '.join(it['colors'])}, "
+            f"style: {', '.join(it['style_tags'])})"
+            for it in items
+        )
+        prompt = (
+            f"A shopper is considering buying this secondhand item:\n{item_desc}\n\n"
+            f"Here is what's already in their wardrobe:\n{wardrobe_lines}\n\n"
+            "Suggest 1-2 complete outfits that pair the new item with specific, "
+            "named pieces from their wardrobe. Refer to the wardrobe pieces by "
+            "name. In 2-4 sentences, describe the looks and any styling tips "
+            "(tucking, layering, rolling, etc.). Keep it casual and specific."
+        )
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are FitFindr, a thrift-savvy personal stylist. You give "
+                    "specific, wearable outfit advice in a warm, casual tone."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.7,
+    )
+    return response.choices[0].message.content.strip()
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +223,41 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    # 1. Guard against an empty or whitespace-only outfit string.
+    if not outfit or not outfit.strip():
+        return (
+            "Can't write a fit card without an outfit suggestion. "
+            "Generate an outfit first, then try again."
+        )
+
+    client = _get_groq_client()
+
+    # 2. Build the prompt from the item details and the outfit.
+    prompt = (
+        f"Item: {new_item['title']}\n"
+        f"Price: ${new_item['price']}\n"
+        f"Platform: {new_item['platform']}\n\n"
+        f"Outfit: {outfit}\n\n"
+        "Write a short, shareable Instagram/TikTok caption (2-4 sentences) for "
+        "this thrifted find. Make it feel casual and authentic — like a real "
+        "OOTD post, not a product description. Mention the item name, price, and "
+        "platform naturally (once each). Capture the outfit vibe in specific "
+        "terms. Reply with just the caption text."
+    )
+
+    # 3. Call the LLM with a high temperature so captions vary between runs.
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You write fun, authentic secondhand-fashion captions for "
+                    "social media — casual, specific, and never salesy."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=1.0,
+    )
+    return response.choices[0].message.content.strip()

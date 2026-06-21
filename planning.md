@@ -29,7 +29,7 @@ Searches the mock listings dataset and returns matching items. Must handle the c
 **What it returns:**
 <!-- Describe the return value — what fields does a result contain? -->
 
-Returns a list of matching listing dicts, sorted by relevance (best match first).
+Returns the top 3 matching listing dicts, sorted by relevance (best match first). Returns fewer than 3 if fewer match.
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if no listings match? -->
@@ -103,6 +103,8 @@ If outfit is empty or missing, return a descriptive error message string — do 
 <!-- Describe the logic your planning loop uses. What does it look at? What conditions change its behavior? How does it know when it's done? -->
 
 The agent runs a fixed three-stage pipeline and only advances when the current stage produces usable output. At each step it inspects the session state and decides the next call:
+
+**Query parsing (before step 1):** the natural-language query is parsed into `description`, `size`, and `max_price` using **regex** (not an LLM call) — `_parse_query()` in `agent.py`. It pulls `max_price` from an "under $30"/"$30" phrase, `size` from a "size M"/"size 8" phrase, and uses the leftover text (filler phrases stripped) as the `description`. The result is stored in `session["parsed"]` and fed into `search_listings`.
 
 1. **`search_listings`** runs first on the user's request. Check whether `search_results` is empty. If it is, store an error message in the session and return early — no further tool is called. Otherwise set `selected_item = search_results[0]` and proceed to `suggest_outfit`.
 
